@@ -34,11 +34,14 @@ from __future__ import with_statement
 import os
 import sqlite3
 import logging
-import commands
+# import commands
+from subprocess import run, PIPE
 from pprint import pprint,pformat
+from datetime import datetime
 
 import constants
-from abstractdriver import *
+# from abstractdriver import *
+from .abstractdriver import AbstractDriver
 
 TXN_QUERIES = {
     "DELIVERY": {
@@ -103,7 +106,7 @@ TXN_QUERIES = {
 ## ==============================================
 class SqliteDriver(AbstractDriver):
     DEFAULT_CONFIG = {
-        "database": ("The path to the SQLite database", "/tmp/tpcc.db" ),
+        "database":     ("The path to the SQLite database", "/tmp/tpcc.db" ),
     }
     
     def __init__(self, ddl):
@@ -134,9 +137,13 @@ class SqliteDriver(AbstractDriver):
         if os.path.exists(self.database) == False:
             logging.debug("Loading DDL file '%s'" % (self.ddl))
             ## HACK
-            cmd = "sqlite3 %s < %s" % (self.database, self.ddl)
-            (result, output) = commands.getstatusoutput(cmd)
-            assert result == 0, cmd + "\n" + output
+            # cmd = "sqlite3 %s < %s" % (self.database, self.ddl)
+            # (result, output) = commands.getstatusoutput(cmd)
+            # assert result == 0, cmd + "\n" + output
+            with open(self.ddl, 'r') as input_file:
+              cmd = ["sqlite3", self.database]
+              result = run(cmd, stdin=input_file, capture_output=True, text=True)
+              assert result.returncode == 0
         ## IF
             
         self.conn = sqlite3.connect(self.database)
@@ -145,9 +152,9 @@ class SqliteDriver(AbstractDriver):
     ## ----------------------------------------------
     ## loadTuples
     ## ----------------------------------------------
-    def loadTuples(self, tableName, tuples):
+    def loadTuples(self, tableName, tuples):            
         if len(tuples) == 0: return
-        
+
         p = ["?"]*len(tuples[0])
         sql = "INSERT INTO %s VALUES (%s)" % (tableName, ",".join(p))
         self.cursor.executemany(sql, tuples)
@@ -162,6 +169,11 @@ class SqliteDriver(AbstractDriver):
         logging.info("Commiting changes to database")
         self.conn.commit()
 
+
+
+    def returnResult(self, res):
+        return (res, 0)
+    
     ## ----------------------------------------------
     ## doDelivery
     ## ----------------------------------------------
@@ -205,7 +217,7 @@ class SqliteDriver(AbstractDriver):
         ## FOR
 
         self.conn.commit()
-        return result
+        return self.returnResult(result)
 
     ## ----------------------------------------------
     ## doNewOrder
@@ -334,7 +346,7 @@ class SqliteDriver(AbstractDriver):
         ## Pack up values the client is missing (see TPC-C 2.4.3.5)
         misc = [ (w_tax, d_tax, d_next_o_id, total) ]
         
-        return [ customer_info, misc, item_data ]
+        return self.returnResult([ customer_info, misc, item_data ])
 
     ## ----------------------------------------------
     ## doOrderStatus
@@ -359,7 +371,7 @@ class SqliteDriver(AbstractDriver):
             all_customers = self.cursor.fetchall()
             assert len(all_customers) > 0
             namecnt = len(all_customers)
-            index = (namecnt-1)/2
+            index = int((namecnt-1)/2)
             customer = all_customers[index]
             c_id = customer[0]
         assert len(customer) > 0
@@ -374,7 +386,7 @@ class SqliteDriver(AbstractDriver):
             orderLines = [ ]
 
         self.conn.commit()
-        return [ customer, order, orderLines ]
+        return self.returnResult([ customer, order, orderLines ])
 
     ## ----------------------------------------------
     ## doPayment
@@ -400,7 +412,7 @@ class SqliteDriver(AbstractDriver):
             all_customers = self.cursor.fetchall()
             assert len(all_customers) > 0
             namecnt = len(all_customers)
-            index = (namecnt-1)/2
+            index = int((namecnt-1)/2)
             customer = all_customers[index]
             c_id = customer[0]
         assert len(customer) > 0
@@ -443,7 +455,7 @@ class SqliteDriver(AbstractDriver):
         # H_AMOUNT, and H_DATE.
 
         # Hand back all the warehouse, district, and customer data
-        return [ warehouse, district, customer ]
+        return self.returnResult([ warehouse, district, customer ])
         
     ## ----------------------------------------------
     ## doStockLevel
@@ -465,6 +477,6 @@ class SqliteDriver(AbstractDriver):
         
         self.conn.commit()
         
-        return int(result[0])
+        return self.returnResult(int(result[0]))
         
 ## CLASS
