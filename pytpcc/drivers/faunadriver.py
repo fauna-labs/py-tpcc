@@ -9,10 +9,11 @@ from fauna.client import Client, QueryOptions
 from fauna.encoding import QuerySuccess, QueryStats
 from fauna.errors import FaunaException
 
+import requests
 from datetime import datetime, timedelta
 from sys import getsizeof
 import random
-
+import json
 
 import constants
 from .abstractdriver import AbstractDriver
@@ -98,7 +99,7 @@ TABLES = {
                       }
                     }                        
                 },
-                "fql": fql(
+                "fql2": fql(
                   """
                   ${list1000}.forEach(x => {
                     WAREHOUSE_YTD.create({
@@ -110,7 +111,23 @@ TABLES = {
                   })
                   """,
                   list1000=list(range(1,1001))
-                )
+                ),
+                "fql": {
+                    "query": """
+                      list1000.forEach(x => {
+                        WAREHOUSE_YTD.create({
+                          shard: x,
+                          warehouse: doc,
+                          W_ID: doc!.W_ID,
+                          W_YTD: if (x == 1) { doc!.W_YTD } else { 0 }
+                        })
+                      })
+                      """,
+                    "arguments": [{
+                        "name": "list1000",
+                        "value": list(range(1, 1001))
+                    }]       
+                }
             }
         ]
     },
@@ -165,7 +182,7 @@ TABLES = {
                     },
                     "constraints": []
                 },
-                "fql": fql(
+                "fql2": fql(
                     """
                     DISTRICT_NextOrderIdCounter.create({
                       district: doc,
@@ -173,7 +190,16 @@ TABLES = {
                     })
                     null
                     """
-                )
+                ),
+                "fql": {
+                    "query": """
+                              DISTRICT_NextOrderIdCounter.create({
+                                district: doc,
+                                next_order_id: doc!.D_NEXT_O_ID
+                              })
+                              null
+                              """
+                } 
             },
             {
                 "name": "DISTRICT_YTD",
@@ -201,7 +227,7 @@ TABLES = {
                     },
                     "constraints": []
                 },
-                "fql": fql(
+                "fql2": fql(
                   """
                   ${list100}.forEach(x => {
                     DISTRICT_YTD.create({
@@ -214,7 +240,25 @@ TABLES = {
                   })
                   """,
                   list100=list(range(1,101))
-                )                
+                ),
+                "fql": {
+                    "query": """
+                            list100.forEach(x => {
+                              DISTRICT_YTD.create({
+                                shard: x,
+                                district: doc,
+                                D_ID: doc!.D_ID,
+                                D_W_ID: doc!.D_W_ID,
+                                D_YTD: if (x == 1) { doc!.D_YTD } else { 0.00 }
+                              })
+                            })
+                            """,
+                    "arguments": [{
+                        "name": "list100",
+                        "value": list(range(1,101))
+                    }]
+                    
+                }
             }
         ]
     },
@@ -489,7 +533,9 @@ class FaunaDriver(AbstractDriver):
         return FaunaDriver.DEFAULT_CONFIG
 
     def loadConfig(self, config):
-        self.client = Client(secret=config["key"], 
+        self.API_KEY = config["key"]
+
+        self.client = Client(secret=config["key"],
                              client_buffer_timeout=timedelta(seconds=20),
                              http_connect_timeout=timedelta(seconds=12),
                              http_pool_timeout=timedelta(seconds=12)
@@ -556,7 +602,7 @@ class FaunaDriver(AbstractDriver):
         batches = []
         tuple_dicts = []
 
-        max_size = 1000000        
+        MAX_SIZE = 250000
         size = 0
 
         for tuple in tuples:                    
@@ -566,7 +612,7 @@ class FaunaDriver(AbstractDriver):
 
             doc = dict(map(lambda i: (columns[i], tuple[i]), num_columns))
             size += getsizeof(doc)
-            if size > max_size:
+            if size > MAX_SIZE:
                 size = 0
                 batches.append(tuple_dicts)
                 tuple_dicts = []
@@ -574,35 +620,68 @@ class FaunaDriver(AbstractDriver):
             tuple_dicts.append(doc)
         batches.append(tuple_dicts)
 
-        end_stmt = None
+        fql = [
+            "docs.forEach(data => {\n",
+            "  let doc = Collection(coll_name).create(data)\n"
+        ]
+        args = {
+            "coll_name": tableName
+        }
         if "children" in TABLES[tableName]:
             for child in TABLES[tableName]["children"]:
                 if "fql" in child:
-                    end_stmt = fql(
-                        """
-                        ${fql1}
-                        ${fql2}
-                        """,
-                        fql1=end_stmt,
-                        fql2=child["fql"]
-                    )
+                    fql.append(child["fql"]["query"])
+                    # end_stmt = fql(
+                    #     """
+                    #     ${fql1}
+                    #     ${fql2}
+                    #     """,
+                    #     fql1=end_stmt,
+                    #     fql2=child["fql"]
+                    # )
+                    if "arguments" in child["fql"]:
+                        for arg in child["fql"]["arguments"]:
+                            args[arg["name"]] = arg["value"]
+        fql.append("  null")
+        fql.append("})")
+
+
+        FAUNA_URL = "https://db.fauna.com/query/1"
         try:
             for docs in batches:
-              loadDocs = fql(
-                  """
-                  ${docs}.forEach(x=>{
-                    let doc = Collection(${coll}).create(x)
-                    ${end_stmt}
-                  })
-                  """,
-                  coll=tableName,
-                  docs=docs,
-                  end_stmt=end_stmt
-                  )
-              res: QuerySuccess = self.client.query(loadDocs, QueryOptions(query_timeout=timedelta(seconds=20)))
-              print(res.stats)
-        except FaunaException as err:
-            logging.error("FaunaException:")
+              # loadDocs = fql(
+              #     """
+              #     ${docs}.forEach(x=>{
+              #       let doc = Collection(${coll}).create(x)
+              #       ${end_stmt}
+              #     })
+              #     """,
+              #     coll=tableName,
+              #     docs=docs,
+              #     end_stmt=end_stmt
+              #     )
+              # res: QuerySuccess = self.client.query(loadDocs, QueryOptions(query_timeout=timedelta(seconds=20)))
+              # print(res.stats)
+              args["docs"] = docs
+              r = requests.post(FAUNA_URL, 
+                                json={
+                                    "query": { "fql": fql },
+                                    "arguments": args
+                                },
+                                headers={
+                                    "Authorization": "Bearer {}".format(self.API_KEY),
+                                    "Content-Type": "application/json"
+                                })
+              response = json.loads(r.text)
+              if "stats" in response:
+                  print(response["stats"])
+              else:
+                  print(response)
+        # except FaunaException as err:
+        #     logging.error("FaunaException:")
+        #     logging.error(err)
+        #     return
+        except Exception as err:
             logging.error(err)
             return
 
