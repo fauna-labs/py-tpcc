@@ -99,30 +99,18 @@ TABLES = {
                       }
                     }                        
                 },
-                "fql2": fql(
-                  """
-                  ${list1000}.forEach(x => {
-                    WAREHOUSE_YTD.create({
-                      shard: x,
-                      warehouse: doc,
-                      W_ID: doc!.W_ID,
-                      W_YTD: if (x == 1) { doc!.W_YTD } else { 0 }
-                    })
-                  })
-                  """,
-                  list1000=list(range(1,1001))
-                ),
                 "fql": {
-                    "query": """
-                      list1000.forEach(x => {
-                        WAREHOUSE_YTD.create({
-                          shard: x,
-                          warehouse: doc,
-                          W_ID: doc!.W_ID,
-                          W_YTD: if (x == 1) { doc!.W_YTD } else { 0 }
-                        })
+                    "query": 
+                    """
+                    list1000.forEach(x => {
+                      WAREHOUSE_YTD.create({
+                        shard: x,
+                        warehouse: doc,
+                        W_ID: doc!.W_ID,
+                        W_YTD: if (x == 1) { doc!.W_YTD } else { 0 }
                       })
-                      """,
+                    })
+                    """,
                     "arguments": [{
                         "name": "list1000",
                         "value": list(range(1, 1001))
@@ -182,23 +170,14 @@ TABLES = {
                     },
                     "constraints": []
                 },
-                "fql2": fql(
+                "fql": {
+                    "query": 
                     """
                     DISTRICT_NextOrderIdCounter.create({
                       district: doc,
                       next_order_id: doc!.D_NEXT_O_ID
                     })
-                    null
                     """
-                ),
-                "fql": {
-                    "query": """
-                              DISTRICT_NextOrderIdCounter.create({
-                                district: doc,
-                                next_order_id: doc!.D_NEXT_O_ID
-                              })
-                              null
-                              """
                 } 
             },
             {
@@ -227,32 +206,19 @@ TABLES = {
                     },
                     "constraints": []
                 },
-                "fql2": fql(
-                  """
-                  ${list100}.forEach(x => {
-                    DISTRICT_YTD.create({
-                      shard: x,
-                      district: doc,
-                      D_ID: doc!.D_ID,
-                      D_W_ID: doc!.D_W_ID,
-                      D_YTD: if (x == 1) { doc!.D_YTD } else { 0.00 }
-                    })
-                  })
-                  """,
-                  list100=list(range(1,101))
-                ),
                 "fql": {
-                    "query": """
-                            list100.forEach(x => {
-                              DISTRICT_YTD.create({
-                                shard: x,
-                                district: doc,
-                                D_ID: doc!.D_ID,
-                                D_W_ID: doc!.D_W_ID,
-                                D_YTD: if (x == 1) { doc!.D_YTD } else { 0.00 }
-                              })
-                            })
-                            """,
+                    "query": 
+                    """
+                    list100.forEach(x => {
+                      DISTRICT_YTD.create({
+                        shard: x,
+                        district: doc,
+                        D_ID: doc!.D_ID,
+                        D_W_ID: doc!.D_W_ID,
+                        D_YTD: if (x == 1) { doc!.D_YTD } else { 0.00 }
+                      })
+                    })
+                    """,
                     "arguments": [{
                         "name": "list100",
                         "value": list(range(1,101))
@@ -519,7 +485,9 @@ TABLES = {
 
 class FaunaDriver(AbstractDriver):
     DEFAULT_CONFIG = {
-        "key":     ("The api key", "secret" ),
+        "key":             ("The api key", "secret" ),
+        "fauna_url":       ("The Fauna endpoint", "https://db.fauna.com/query/1"),
+        "max_batch_size":  ("Fauna API payload size limit", 250000)
     }
 
 
@@ -532,14 +500,16 @@ class FaunaDriver(AbstractDriver):
     def makeDefaultConfig(self):
         return FaunaDriver.DEFAULT_CONFIG
 
-    def loadConfig(self, config):
-        self.API_KEY = config["key"]
 
-        self.client = Client(secret=config["key"],
+    def loadConfig(self, config):        
+        self.API_KEY = config["key"]
+        self.FAUNA_URL = config["fauna_url"]
+        self.client = Client(secret=self.API_KEY,
                              client_buffer_timeout=timedelta(seconds=20),
                              http_connect_timeout=timedelta(seconds=12),
                              http_pool_timeout=timedelta(seconds=12)
                              )
+        self.MAX_BATCH_SIZE_BYTES = int(config["max_batch_size"])
 
         for table in constants.ALL_TABLES:
             if "children" in TABLES[table]:
@@ -602,68 +572,42 @@ class FaunaDriver(AbstractDriver):
         batches = []
         tuple_dicts = []
 
-        MAX_SIZE = 250000
         size = 0
-
-        for tuple in tuples:                    
+        for tuple in tuples:
             for idx, field in enumerate(tuple):
                 if isinstance(field, datetime):
                     tuple[idx] = self._datetimeToIsoString(field)
 
             doc = dict(map(lambda i: (columns[i], tuple[i]), num_columns))
             size += getsizeof(doc)
-            if size > MAX_SIZE:
+            if size > self.MAX_BATCH_SIZE_BYTES:
                 size = 0
                 batches.append(tuple_dicts)
                 tuple_dicts = []
-
             tuple_dicts.append(doc)
         batches.append(tuple_dicts)
 
+        args = {
+            "coll_name": tableName
+        }
         fql = [
             "docs.forEach(data => {\n",
             "  let doc = Collection(coll_name).create(data)\n"
         ]
-        args = {
-            "coll_name": tableName
-        }
         if "children" in TABLES[tableName]:
             for child in TABLES[tableName]["children"]:
                 if "fql" in child:
                     fql.append(child["fql"]["query"])
-                    # end_stmt = fql(
-                    #     """
-                    #     ${fql1}
-                    #     ${fql2}
-                    #     """,
-                    #     fql1=end_stmt,
-                    #     fql2=child["fql"]
-                    # )
                     if "arguments" in child["fql"]:
                         for arg in child["fql"]["arguments"]:
                             args[arg["name"]] = arg["value"]
         fql.append("  null")
         fql.append("})")
 
-
-        FAUNA_URL = "https://db.fauna.com/query/1"
         try:
             for docs in batches:
-              # loadDocs = fql(
-              #     """
-              #     ${docs}.forEach(x=>{
-              #       let doc = Collection(${coll}).create(x)
-              #       ${end_stmt}
-              #     })
-              #     """,
-              #     coll=tableName,
-              #     docs=docs,
-              #     end_stmt=end_stmt
-              #     )
-              # res: QuerySuccess = self.client.query(loadDocs, QueryOptions(query_timeout=timedelta(seconds=20)))
-              # print(res.stats)
               args["docs"] = docs
-              r = requests.post(FAUNA_URL, 
+              r = requests.post(self.FAUNA_URL, 
                                 json={
                                     "query": { "fql": fql },
                                     "arguments": args
@@ -677,10 +621,6 @@ class FaunaDriver(AbstractDriver):
                   print(response["stats"])
               else:
                   print(response)
-        # except FaunaException as err:
-        #     logging.error("FaunaException:")
-        #     logging.error(err)
-        #     return
         except Exception as err:
             logging.error(err)
             return
@@ -776,9 +716,6 @@ class FaunaDriver(AbstractDriver):
         assert len(i_ids) == len(i_qtys), "different number of i_ids and i_qtys"
 
         all_local = list(set(i_w_ids)) == [w_id]
-        # print("i_ids {}".format(i_ids))
-        # print("i_w_ids {}".format(i_w_ids))
-        # print("i_qtys {}".format(i_qtys))
 
         try:
             q = fql("""
