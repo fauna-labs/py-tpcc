@@ -219,26 +219,30 @@ class Results:
             result_doc['warehouses'] = driver.warehouses if hasattr(driver, "warehouses") else 0
             result_doc['date'] = time.strftime("%Y-%m-%d %H:%M:%S")
             result_doc['threads'] = threads
-            result_doc['txn'] = not driver.no_transactions if hasattr(driver, "no_transactions") else False
+            result_doc['txn'] = not driver.no_transactions if hasattr(driver, "no_transactions") else True
             result_doc['batch_writes'] = driver.batch_writes if hasattr(driver, "batch_writes") else True
             result_doc['find_and_modify'] = driver.find_and_modify if hasattr(driver, "find_and_modify") else True
-            result_doc['read_preference'] = driver.read_preference if hasattr(driver, "read_preference") else "primary"
-            result_doc['write_concern'] = driver.write_concern.document['w'] if hasattr(driver, "write_concern") else ""
+            result_doc['read_preference'] = driver.read_preference if hasattr(driver, "read_preference") else "N/A"
+            result_doc['write_concern'] = driver.write_concern.document['w'] if hasattr(driver, "write_concern") else "N/A"
             result_doc['causal'] = driver.causal_consistency if hasattr(driver, "causal_consistency") else False
             result_doc['all_in_one_txn'] = driver.all_in_one_txn if hasattr(driver, "all_in_one_txn") else True
             result_doc['retry_writes'] = driver.retry_writes if hasattr(driver, "retry_writes") else True
-            result_doc['read_concern'] = driver.read_concern if hasattr(driver, "read_concern") else "majority"
+            result_doc['read_concern'] = driver.read_concern if hasattr(driver, "read_concern") else "N/A"
             result_doc['total_retries'] = total_retries
             result_doc['total'] = total_cnt
             result_doc['aborts'] = total_aborts
             ret += "\n%s TpmC for %s %s thr %s txn %d WH: %d %d total %d durSec, batch %s %d retries %s%% %s fnM %s p50 %s p75 %s p90 %s p95 %s p99 %s max %s WC %s causal %s 10in1 %s retry %s %d %d" % (
                 time.strftime("%Y-%m-%d %H:%M:%S"),
-                ("normal", "denorm")[result_doc['denorm']],
+                ("norm", "denorm")[result_doc['denorm']],
                 threads,
-                ("with", "w/o ")[not result_doc['txn']],
+                ("with", "w/o")[not result_doc['txn']],
                 result_doc['warehouses'],
-                round(txn_new_order*60/duration), txn_new_order, duration,
-                ("off", "on")[result_doc['batch_writes']], total_retries, str(100.0*total_retries/total_cnt)[:5],
+                round(txn_new_order*60/duration), 
+                txn_new_order, 
+                duration,
+                ("off", "on")[result_doc['batch_writes']], 
+                total_retries, 
+                str(100.0*total_retries/total_cnt)[:5],
                 ("w/o ", "with")[result_doc['find_and_modify']],
                 result_doc['read_preference'],
                 u"%6.2f" % (1000* lat[int(samples/2)]), u"%6.2f" % (1000*lat[int(samples/100.0*75)]),

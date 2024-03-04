@@ -7,7 +7,7 @@ from pprint import pprint,pformat
 from fauna import fql
 from fauna.client import Client, QueryOptions
 from fauna.encoding import QuerySuccess, QueryStats
-from fauna.errors import FaunaException
+from fauna.errors import FaunaException, AbortError
 
 import requests
 from datetime import datetime, timedelta
@@ -486,8 +486,9 @@ TABLES = {
 class FaunaDriver(AbstractDriver):
     DEFAULT_CONFIG = {
         "key":             ("The api key", "secret" ),
-        "fauna_url":       ("The Fauna endpoint", "https://db.fauna.com/query/1"),
-        "max_batch_size":  ("Fauna API payload size limit", 250000)
+        "fauna_url":       ("The Fauna endpoint", "https://db.fauna.com"),
+        "max_batch_size":  ("Fauna API payload size limit", 250000),
+        "denormalize":     ("If true, data will be denormalized using NoSQL schema design best practices", True),
     }
 
 
@@ -495,6 +496,9 @@ class FaunaDriver(AbstractDriver):
         super(FaunaDriver, self).__init__("fauna", ddl)
         self.database = None
         self.client = None
+        self.FAUNA_URL = "https://db.fauna.com/query/1"
+        self.MAX_BATCH_SIZE_BYTES = 250000
+        self.denormalize = True
 
 
     def makeDefaultConfig(self):
@@ -503,13 +507,14 @@ class FaunaDriver(AbstractDriver):
 
     def loadConfig(self, config):        
         self.API_KEY = config["key"]
-        self.FAUNA_URL = config["fauna_url"]
+        self.FAUNA_URL = str(config["fauna_url"]) + "/query/1"
         self.client = Client(secret=self.API_KEY,
                              client_buffer_timeout=timedelta(seconds=20),
                              http_connect_timeout=timedelta(seconds=12),
                              http_pool_timeout=timedelta(seconds=12)
                              )
         self.MAX_BATCH_SIZE_BYTES = int(config["max_batch_size"])
+        self.denormalize = config['denormalize'] == 'True'
 
         for table in constants.ALL_TABLES:
             if "children" in TABLES[table]:
@@ -518,7 +523,6 @@ class FaunaDriver(AbstractDriver):
                     schema["name"] = child["name"]
                     try :
                         res = self._loadConfigUpdateSchema(schema)
-                        logging.info("%s", str(res.data))
                     except Exception as err:
                         logging.error(err)
                         return
@@ -553,9 +557,7 @@ class FaunaDriver(AbstractDriver):
 
 
     def _datetimeToIsoString(self, d):
-        if not isinstance(d, datetime):
-            return d
-        
+        if not isinstance(d, datetime): return d        
         isoDateStr = str(d).split(" ")
         return "%sT%sZ" % (isoDateStr[0], isoDateStr[1])
 
@@ -694,7 +696,7 @@ class FaunaDriver(AbstractDriver):
             res: QuerySuccess = self.client.query(q, QueryOptions(query_tags={"operation": "doDelivery"}))
             for newOrder in res.data:
                 result.append((newOrder["d_id"], newOrder["no_o_id"]))
-        except FaunaException as err:
+        except FaunaException as err:          
             logging.error("FaunaException:")
             logging.error(err)
             return
@@ -895,6 +897,9 @@ class FaunaDriver(AbstractDriver):
             total = data["total"] * (1 - c_discount) * (1 + w_tax + d_tax)
             misc = [ (w_tax, d_tax, data["d_next_o_id"], total) ]
             return self.returnResult([ customer_info, misc, item_data ])
+        except AbortError as err:
+            logging.debug(err.abort)
+            return self.returnResult(None)
         except FaunaException as err:
             logging.error("FaunaException:")
             logging.error(err)
