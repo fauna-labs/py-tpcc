@@ -643,6 +643,32 @@ class FaunaDriver(AbstractDriver):
 
         result = [ ]
         try:
+            if self.denormalize:
+                q_update_deliver_date = fql("""
+                                            let ol = o!.O_ORDER_LINES
+                                            let updated_order = {
+                                              O_CARRIER_ID: ${o_carrier_id},
+                                              O_DELIVERY_D: ${ol_delivery_d}
+                                            }
+                                            """,
+                                            w_id=w_id,
+                                            ol_delivery_d=ol_delivery_d,
+                                            o_carrier_id=o_carrier_id)                                                            
+            else:
+                q_update_deliver_date = fql("""
+                                            let ol = ORDER_LINE.byOrderDistrictWarehouse(no_o_id, d_id, ${w_id})
+                                            ol.forEach(x => {
+                                              x.update({
+                                                OL_DELIVERY_D: ${ol_delivery_d}
+                                              })
+                                            })
+                                            let updated_order = {
+                                              O_CARRIER_ID: ${o_carrier_id}
+                                            }
+                                            """,
+                                            w_id=w_id,
+                                            ol_delivery_d=ol_delivery_d,
+                                            o_carrier_id=o_carrier_id)
             q = fql("""
                     let newOrders = ${districts}.map(d_id => {
                       let no_doc = NEW_ORDER.byDistrictWarehouse(d_id, ${w_id}).where(.NO_O_ID > -1).first()
@@ -663,19 +689,14 @@ class FaunaDriver(AbstractDriver):
                     newOrders.forEach(newOrder => {                    
                       let no_o_id = newOrder.no_o_id
                       let d_id = newOrder.d_id
-                    
-                      // update the carrier id and return the customer's id
-                      let c_id = ORDERS.byOidDistrictWarehouse(no_o_id, d_id, ${w_id}).first()!.update({
-                        O_CARRIER_ID: ${o_carrier_id}
-                      }).O_C_ID
+                      let o = ORDERS.byOidDistrictWarehouse(no_o_id, d_id, ${w_id}).first()
 
-                      // populate the delivery date                        
-                      let ol = ORDER_LINE.byOrderDistrictWarehouse(no_o_id, d_id, ${w_id})
-                      ol.forEach(x => {
-                        x.update({
-                          OL_DELIVERY_D: ${ol_delivery_d}
-                        })
-                      })
+                      // populate the delivery date
+                      ${q_update_deliver_date}
+
+                      // update the carrier id and return the customer's id
+                      let c_id = o!.update(updated_order).O_C_ID
+                                        
                       // calculate the total amount
                       let ol_total = Math.round(ol.map(x => x.OL_AMOUNT).aggregate(0, (a, b) => a+b), 2)
                       if (ol_total > 0) {
@@ -691,7 +712,8 @@ class FaunaDriver(AbstractDriver):
                     districts=districts,
                     w_id=w_id,
                     o_carrier_id=o_carrier_id,
-                    ol_delivery_d=ol_delivery_d
+                    ol_delivery_d=ol_delivery_d,
+                    q_update_deliver_date=q_update_deliver_date
                     )
             res: QuerySuccess = self.client.query(q, QueryOptions(query_tags={"operation": "doDelivery"}))
             for newOrder in res.data:
@@ -720,6 +742,45 @@ class FaunaDriver(AbstractDriver):
         all_local = list(set(i_w_ids)) == [w_id]
 
         try:
+            if (self.denormalize):
+                q_order_line_create = fql("")
+                q_order_lines_denorm_append = fql("""
+                                                  val.order_lines.append({
+                                                    OL_NUMBER: ol_number,
+                                                    OL_I_ID: ol_i_id,
+                                                    OL_SUPPLY_W_ID: ol_supply_w_id, 
+                                                    OL_QUANTITY: ol_quantity, 
+                                                    OL_AMOUNT: ol_amount, 
+                                                    OL_DIST_INFO: s_dist_xx
+                                                  })
+                                                  """)
+                q_denorm_order_lines = fql("""
+                                           {
+                                              O_ORDER_LINES: info.order_lines
+                                           }
+                                           """)
+            else:
+                q_order_line_create = fql("""
+                                          ORDER_LINE.create({
+                                            OL_O_ID: d_next_o_id, 
+                                            OL_D_ID: ${d_id}, 
+                                            OL_W_ID: ${w_id}, 
+                                            OL_NUMBER: ol_number, 
+                                            OL_I_ID: ol_i_id, 
+                                            OL_SUPPLY_W_ID: ol_supply_w_id, 
+                                            OL_DELIVERY_D: ${o_entry_d}, 
+                                            OL_QUANTITY: ol_quantity, 
+                                            OL_AMOUNT: ol_amount, 
+                                            OL_DIST_INFO: s_dist_xx
+                                          })
+                                          """)                
+                q_order_lines_denorm_append = fql("[]")
+                q_denorm_order_lines = fql("""
+                                           {
+                                              O_ORDER_LINES: null
+                                           }
+                                           """)
+
             q = fql("""
                     let items = ${i_ids}.map(x => {
                       let i = ITEM.byItemId(x).first()
@@ -754,18 +815,6 @@ class FaunaDriver(AbstractDriver):
                       ttl: Time.now().add(1, "minute")
                     })
 
-                    // Create Order
-                    ORDERS.create({
-                      O_ID: d_next_o_id, 
-                      O_D_ID: ${d_id}, 
-                      O_W_ID: ${w_id}, 
-                      O_C_ID: ${c_id}, 
-                      O_ENTRY_D: ${o_entry_d}, 
-                      O_CARRIER_ID: ${o_carrier_id}, 
-                      O_OL_CNT: ol_cnt, 
-                      O_ALL_LOCAL: ${all_local}
-                    })
-
                     // Create New Order
                     NEW_ORDER.create({
                       NO_O_ID: d_next_o_id,
@@ -779,7 +828,8 @@ class FaunaDriver(AbstractDriver):
                     let info = items.entries().fold(
                       {
                         total: 0,
-                        item_data: []
+                        item_data: [],
+                        order_lines: []
                       }, 
                       (val, x) => {
                         let i: Any = x[0]
@@ -833,18 +883,7 @@ class FaunaDriver(AbstractDriver):
                       
                         let ol_amount = Math.round(ol_quantity * i_price, 2)
                       
-                        ORDER_LINE.create({
-                          OL_O_ID: d_next_o_id, 
-                          OL_D_ID: ${d_id}, 
-                          OL_W_ID: ${w_id}, 
-                          OL_NUMBER: ol_number, 
-                          OL_I_ID: ol_i_id, 
-                          OL_SUPPLY_W_ID: ol_supply_w_id, 
-                          OL_DELIVERY_D: ${o_entry_d}, 
-                          OL_QUANTITY: ol_quantity, 
-                          OL_AMOUNT: ol_amount, 
-                          OL_DIST_INFO: s_dist_xx
-                        })
+                        ${q_order_line_create}
                       
                         {
                           total: val.total + ol_amount,
@@ -854,9 +893,27 @@ class FaunaDriver(AbstractDriver):
                             brand_generic: brand_generic, 
                             i_price: i_price, 
                             ol_amount: ol_amount                    
-                          })
+                          }),
+                          order_lines: ${q_order_lines_denorm_append}
                         }
                       }
+                    )
+
+                    // Create Order
+                    ORDERS.createData(
+                      Object.assign(
+                        {
+                          O_ID: d_next_o_id, 
+                          O_D_ID: ${d_id}, 
+                          O_W_ID: ${w_id}, 
+                          O_C_ID: ${c_id}, 
+                          O_ENTRY_D: ${o_entry_d}, 
+                          O_CARRIER_ID: ${o_carrier_id}, 
+                          O_OL_CNT: ol_cnt, 
+                          O_ALL_LOCAL: ${all_local}
+                        },
+                        ${q_denorm_order_lines}
+                      )
                     )
 
                     let customer = CUSTOMER.byCustomerDistrictWarehouse(${c_id}, ${d_id}, ${w_id}).first() {
@@ -880,22 +937,27 @@ class FaunaDriver(AbstractDriver):
                     o_carrier_id=constants.NULL_CARRIER_ID,
                     all_local=all_local,
                     string_original=constants.ORIGINAL_STRING,
+                    q_order_line_create=q_order_line_create,
+                    q_order_lines_denorm_append=q_order_lines_denorm_append,
+                    q_denorm_order_lines=q_denorm_order_lines
                     )
             res: QuerySuccess = self.client.query(q, QueryOptions(query_tags={"operation": "doNewOrder"}))
             data = res.data
             stats: QueryStats = res.stats
             print(stats)
-            item_data = [ ]
-            for i in data["item_data"]:
-                item_data.append( (i["i_name"], i["s_quantity"], i["brand_generic"], i["i_price"], i["ol_amount"]) )
+            item_data = data["item_data"]
             customer_info = data["customer_info"]
-            customer_info = (customer_info["C_DISCOUNT"], customer_info["C_LAST"], customer_info["C_CREDIT"])
             ## Pack up values the client is missing (see TPC-C 2.4.3.5)
             c_discount = data["customer_info"]["C_DISCOUNT"]
             w_tax = data["w_tax"]
             d_tax = data["d_tax"]
             total = data["total"] * (1 - c_discount) * (1 + w_tax + d_tax)
-            misc = [ (w_tax, d_tax, data["d_next_o_id"], total) ]
+            misc = {
+                "w_tax": w_tax,
+                "d_tax": d_tax,
+                "next_o_id": data["d_next_o_id"],
+                "total": total
+            }
             return self.returnResult([ customer_info, misc, item_data ])
         except AbortError as err:
             logging.debug(err.abort)
@@ -916,6 +978,21 @@ class FaunaDriver(AbstractDriver):
         assert d_id, pformat(params)
 
         try:
+            if self.denormalize:
+                q_order_line_denorm = fql("""
+                                          let ol = o!.O_ORDER_LINES
+                                          """,
+                                          d_id=d_id,
+                                          w_id=w_id)                
+            else:
+                q_order_line_denorm = fql("""
+                                          let ol = (ORDER_LINE.byOrderDistrictWarehouse(o!.O_ID, ${d_id}, ${w_id}) {
+                                            OL_SUPPLY_W_ID, OL_I_ID, OL_QUANTITY, OL_AMOUNT, OL_DELIVERY_D
+                                          }).toArray()
+                                          """,
+                                          d_id=d_id,
+                                          w_id=w_id)
+
             q = fql("""
                     let c = if (${cid} != null) {
                       CUSTOMER.byCustomerDistrictWarehouse(${cid}, ${d_id}, ${w_id}).first() {
@@ -930,22 +1007,22 @@ class FaunaDriver(AbstractDriver):
                     let c_id = c!.C_ID
 
                     let o = ORDERS.byCidDistrictWarehouse(c_id, ${d_id}, ${w_id}).first() {
-                      O_ID, O_CARRIER_ID, O_ENTRY_D
+                      O_ID, O_CARRIER_ID, O_ENTRY_D, O_ORDER_LINES
                     }
-                    let ol = ORDER_LINE.byOrderDistrictWarehouse(o!.O_ID, ${d_id}, ${w_id}) {
-                      OL_SUPPLY_W_ID, OL_I_ID, OL_QUANTITY, OL_AMOUNT, OL_DELIVERY_D
-                    }
+
+                    ${q_order_line_denorm}
 
                     {
                       customer: c,
                       order: o,
-                      orderLines: ol.toArray()
+                      orderLines: ol
                     }
                     """,
                     cid=c_id,
                     c_last=c_last,
                     d_id=d_id,
-                    w_id=w_id
+                    w_id=w_id,
+                    q_order_line_denorm=q_order_line_denorm
                   )
             res: QuerySuccess = self.client.query(q, QueryOptions(query_tags={"operation": "doOrderStatus"}))
             data = res.data
@@ -1071,22 +1148,43 @@ class FaunaDriver(AbstractDriver):
         threshold = params["threshold"]
 
         try:
-            q = fql("""
-                    let district = DISTRICT.byDistrictIdAndWarehouse(${d_id}, ${w_id}).first()
-                    let o_id = DISTRICT_NextOrderIdCounter.byDistrict(district).first()!.next_order_id
+            if self.denormalize:
+                q = fql("""
+                        let district = DISTRICT.byDistrictIdAndWarehouse(${d_id}, ${w_id}).first()
+                        let o_id = DISTRICT_NextOrderIdCounter.byDistrict(district).first()!.next_order_id
+                        ${twenty}.map(x => {
+                          let oid = o_id - (x+1)
+                          ORDERS.byOidDistrictWarehouse(oid, ${d_id}, ${w_id}).first()!.O_ORDER_LINES
+                        })
+                        .flatten()
+                        .distinct()
+                        .map(x => {
+                          STOCK.byItemIdAndWarehouse(x, 1).where(.S_QUANTITY < 20).count()
+                        })
+                        .filter(x => { x > 0 }).length
+                        """,
+                        w_id=w_id,
+                        d_id=d_id,
+                        threshold=threshold,
+                        twenty=list(range(0,20))
+                      )                
+            else:
+                q = fql("""
+                        let district = DISTRICT.byDistrictIdAndWarehouse(${d_id}, ${w_id}).first()
+                        let o_id = DISTRICT_NextOrderIdCounter.byDistrict(district).first()!.next_order_id
 
-                    ORDER_LINE.byDistrictWarehouse(${d_id}, ${w_id}, { 
-                      from: o_id - 20,
-                      to: o_id - 1
-                    }).map(ol => {
-                      let s = STOCK.byItemIdAndWarehouse(ol.OL_I_ID, ${w_id}).where(.S_QUANTITY < ${threshold})
-                      s.toArray()
-                    }).toArray().flatten().distinct().length
-                    """,
-                    w_id=w_id,
-                    d_id=d_id,
-                    threshold=threshold
-                  )
+                        ORDER_LINE.byDistrictWarehouse(${d_id}, ${w_id}, { 
+                          from: o_id - 20,
+                          to: o_id - 1
+                        }).map(ol => {
+                          let s = STOCK.byItemIdAndWarehouse(ol.OL_I_ID, ${w_id}).where(.S_QUANTITY < ${threshold})
+                          s.toArray()
+                        }).toArray().flatten().distinct().length
+                        """,
+                        w_id=w_id,
+                        d_id=d_id,
+                        threshold=threshold
+                      )
             res: QuerySuccess = self.client.query(q, QueryOptions(query_tags={"operation": "doStockLevel"}))
             return self.returnResult(int(res.data))
         except FaunaException as err:
