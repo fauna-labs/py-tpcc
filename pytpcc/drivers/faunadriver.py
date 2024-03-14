@@ -490,7 +490,10 @@ class FaunaDriver(AbstractDriver):
         "max_batch_size":  ("Fauna API payload size limit", 250000),
         "denormalize":     ("If true, data will be denormalized using NoSQL schema design best practices", True),
     }
-
+    DENORMALIZED_TABLES = [
+        constants.TABLENAME_ORDERS,
+        constants.TABLENAME_ORDER_LINE
+    ]
 
     def __init__(self, ddl):
         super(FaunaDriver, self).__init__("fauna", ddl)
@@ -499,6 +502,7 @@ class FaunaDriver(AbstractDriver):
         self.FAUNA_URL = "https://db.fauna.com/query/1"
         self.MAX_BATCH_SIZE_BYTES = 250000
         self.denormalize = True
+        self.w_orders = {}
 
 
     def makeDefaultConfig(self):
@@ -570,62 +574,126 @@ class FaunaDriver(AbstractDriver):
 
         columns = TABLES[tableName]["columns"]
         num_columns = range(len(columns))
-        
-        batches = []
-        tuple_dicts = []
 
-        size = 0
-        for tuple in tuples:
-            for idx, field in enumerate(tuple):
+        for t in tuples:
+            for idx, field in enumerate(t):
                 if isinstance(field, datetime):
-                    tuple[idx] = self._datetimeToIsoString(field)
+                    t[idx] = self._datetimeToIsoString(field)
+        
+        if self.denormalize and tableName in FaunaDriver.DENORMALIZED_TABLES:
+            if tableName == constants.TABLENAME_ORDERS:
+                for t in tuples:
+                    key = tuple(t[:1]+t[2:4]) # O_ID, O_C_ID, O_D_ID, O_W_ID
+                    # self.w_orders[key] = dict([(columns[i], t[i]) for i in num_columns])
+                    self.w_orders[key] = dict(map(lambda i: (columns[i], t[i]), num_columns))
+            elif tableName == constants.TABLENAME_ORDER_LINE:
+                for t in tuples:
+                    o_key = tuple(t[:3]) # O_ID, O_D_ID, O_W_ID
+                    assert o_key in self.w_orders, "Order Key: %s\nAll Keys:\n%s" % (str(o_key), "\n".join(map(str, sorted(self.w_orders.keys()))))
+                    o = self.w_orders[o_key]
+                    if not "O_ORDER_LINES" in o:
+                        o["O_ORDER_LINES"] = []
+                    o["O_ORDER_LINES"].append(dict([(columns[i], t[i]) for i in num_columns[4:]]))
 
-            doc = dict(map(lambda i: (columns[i], tuple[i]), num_columns))
-            size += getsizeof(doc)
-            if size > self.MAX_BATCH_SIZE_BYTES:
-                size = 0
-                batches.append(tuple_dicts)
-                tuple_dicts = []
-            tuple_dicts.append(doc)
-        batches.append(tuple_dicts)
+            ## Otherwise nothing
+            else: assert False, "Only Orders and order lines are denormalized! Got %s." % tableName
+        else:
+            batches = []
+            tuple_dicts = []
+            size = 0
+            for t in tuples:
+                doc = dict(map(lambda i: (columns[i], t[i]), num_columns))
+                size += getsizeof(doc)
+                if size > self.MAX_BATCH_SIZE_BYTES:
+                    size = 0
+                    batches.append(tuple_dicts)
+                    tuple_dicts = []
+                tuple_dicts.append(doc)
+            batches.append(tuple_dicts)
 
-        args = {
-            "coll_name": tableName
-        }
-        fql = [
-            "docs.forEach(data => {\n",
-            "  let doc = Collection(coll_name).create(data)\n"
-        ]
-        if "children" in TABLES[tableName]:
-            for child in TABLES[tableName]["children"]:
-                if "fql" in child:
-                    fql.append(child["fql"]["query"])
-                    if "arguments" in child["fql"]:
-                        for arg in child["fql"]["arguments"]:
-                            args[arg["name"]] = arg["value"]
-        fql.append("  null")
-        fql.append("})")
+            args = {
+                "coll_name": tableName
+            }
+            fql = [
+                "docs.forEach(data => {\n",
+                "  let doc = Collection(coll_name).create(data)\n"
+            ]
+            if "children" in TABLES[tableName]:
+                for child in TABLES[tableName]["children"]:
+                    if "fql" in child:
+                        fql.append(child["fql"]["query"])
+                        if "arguments" in child["fql"]:
+                            for arg in child["fql"]["arguments"]:
+                                args[arg["name"]] = arg["value"]
+            fql.append("  null")
+            fql.append("})")
 
-        try:
-            for docs in batches:
-              args["docs"] = docs
-              r = requests.post(self.FAUNA_URL, 
-                                json={
-                                    "query": { "fql": fql },
-                                    "arguments": args
-                                },
-                                headers={
-                                    "Authorization": "Bearer {}".format(self.API_KEY),
-                                    "Content-Type": "application/json"
-                                })
-              response = json.loads(r.text)
-              if "stats" in response:
-                  print(response["stats"])
-              else:
-                  print(response)
-        except Exception as err:
-            logging.error(err)
-            return
+            try:
+                for docs in batches:
+                    args["docs"] = docs
+                    r = requests.post(self.FAUNA_URL, 
+                                      json={
+                                          "query": { "fql": fql },
+                                          "arguments": args
+                                      },
+                                      headers={
+                                          "Authorization": "Bearer {}".format(self.API_KEY),
+                                          "Content-Type": "application/json"
+                                      })
+                    response = json.loads(r.text)
+                    if "stats" in response:
+                        print(response["stats"])
+                    else:
+                        print(response)
+            except Exception as err:
+                logging.error(err)
+                return
+
+
+    def loadFinishDistrict(self, w_id, d_id):
+        if self.denormalize:
+            logging.debug("Pushing %d denormalized ORDERS records for WAREHOUSE %d DISTRICT %d", len(self.w_orders), w_id, d_id)
+            batches = []
+            tuple_dicts = []
+            size = 0
+            for doc in self.w_orders.values():
+                size += getsizeof(doc)
+                if size > self.MAX_BATCH_SIZE_BYTES:
+                    size = 0
+                    batches.append(tuple_dicts)
+                    tuple_dicts = []
+                tuple_dicts.append(doc)
+            batches.append(tuple_dicts)            
+            self.w_orders.clear()
+
+            args = {
+                "coll_name": constants.TABLENAME_ORDERS
+            }
+            fql = [
+                "docs.forEach(data => {\n",
+                "  Collection(coll_name).create(data)\n",
+                "})\n"
+            ]
+            try:
+                for docs in batches:
+                    args["docs"] = docs
+                    r = requests.post(self.FAUNA_URL, 
+                                      json={
+                                          "query": { "fql": fql },
+                                          "arguments": args
+                                      },
+                                      headers={
+                                          "Authorization": "Bearer {}".format(self.API_KEY),
+                                          "Content-Type": "application/json"
+                                      })
+                    response = json.loads(r.text)
+                    if "stats" in response:
+                        print(response["stats"])
+                    else:
+                        print(response)
+            except Exception as err:
+                logging.error(err)
+                return
 
 
     def returnResult(self, res):
@@ -742,7 +810,7 @@ class FaunaDriver(AbstractDriver):
         all_local = list(set(i_w_ids)) == [w_id]
 
         try:
-            if (self.denormalize):
+            if self.denormalize:
                 q_order_line_create = fql("")
                 q_order_lines_denorm_append = fql("""
                                                   val.order_lines.append({
@@ -980,12 +1048,18 @@ class FaunaDriver(AbstractDriver):
         try:
             if self.denormalize:
                 q_order_line_denorm = fql("""
+                                          let o = ORDERS.byCidDistrictWarehouse(c_id, ${d_id}, ${w_id}).first() {
+                                            O_ID, O_CARRIER_ID, O_ENTRY_D, O_ORDER_LINES
+                                          }
                                           let ol = o!.O_ORDER_LINES
                                           """,
                                           d_id=d_id,
                                           w_id=w_id)                
             else:
                 q_order_line_denorm = fql("""
+                                          let o = ORDERS.byCidDistrictWarehouse(c_id, ${d_id}, ${w_id}).first() {
+                                            O_ID, O_CARRIER_ID, O_ENTRY_D
+                                          }
                                           let ol = (ORDER_LINE.byOrderDistrictWarehouse(o!.O_ID, ${d_id}, ${w_id}) {
                                             OL_SUPPLY_W_ID, OL_I_ID, OL_QUANTITY, OL_AMOUNT, OL_DELIVERY_D
                                           }).toArray()
@@ -1005,10 +1079,6 @@ class FaunaDriver(AbstractDriver):
                       customers.toArray()[Math.floor( customers.count()/2 )]
                     }
                     let c_id = c!.C_ID
-
-                    let o = ORDERS.byCidDistrictWarehouse(c_id, ${d_id}, ${w_id}).first() {
-                      O_ID, O_CARRIER_ID, O_ENTRY_D, O_ORDER_LINES
-                    }
 
                     ${q_order_line_denorm}
 
