@@ -126,8 +126,7 @@ class Results:
             self.txn_times[txn_name] = orig_time + r.txn_times[txn_name]
             self.txn_retries[txn_name] = orig_retries + r.txn_retries[txn_name]
             self.txn_aborts[txn_name] = orig_aborts + r.txn_aborts[txn_name]
-            print("%s [cnt=%d, time=%d]" % (txn_name, self.txn_counters[txn_name], self.txn_times[txn_name]))
-            # logging.debug("%s [cnt=%d, time=%d]" % (txn_name, self.txn_counters[txn_name], self.txn_times[txn_name]))
+            logging.debug("%s [cnt=%d, time=%d]" % (txn_name, self.txn_counters[txn_name], self.txn_times[txn_name]))
             if txn_name not in self.latencies:
                 self.latencies[txn_name] = []
             self.latencies[txn_name].extend(r.latencies[txn_name])
@@ -204,7 +203,6 @@ class Results:
             if just_retries:
                 result_doc[txn]['retries']={'retries_ops':freq_dist, 'retries_txn_total':total_retries, 'retries_total_ops':len(just_retries)}
 
-        print(self.txn_counters)
         txn_new_order = self.txn_counters.get('NEW_ORDER', 0)
         ret += "\n" + line # ("-"*total_width)
         #total_rate = "%.02f txn/s" % ((total_cnt / total_time))
@@ -212,7 +210,6 @@ class Results:
         samples = len(lat)
         ret += f % ("TOTAL", str(total_cnt), u"%12.3f" % total_time, "", "", "", "", "", "", "", "", "", "")
         if driver != None:
-            # print(driver)
             result_doc['tpmc'] = txn_new_order*60/duration
             result_doc['denorm'] = driver.denormalize if hasattr(driver, "denormalize") else True
             result_doc['duration'] = duration

@@ -696,8 +696,8 @@ class FaunaDriver(AbstractDriver):
                 return
 
 
-    def returnResult(self, res):
-        return (res, 0)
+    def returnResult(self, res, retries=0):
+        return (res, retries)
 
 
     def doDelivery(self, params):        
@@ -784,14 +784,14 @@ class FaunaDriver(AbstractDriver):
                     q_update_deliver_date=q_update_deliver_date
                     )
             res: QuerySuccess = self.client.query(q, QueryOptions(query_tags={"operation": "doDelivery"}))
+            stats: QueryStats = res.stats
             for newOrder in res.data:
                 result.append((newOrder["d_id"], newOrder["no_o_id"]))
+            return self.returnResult(result, stats.contention_retries)
         except FaunaException as err:          
             logging.error("FaunaException:")
             logging.error(err)
             return
-            
-        return self.returnResult(result)
 
 
     def doNewOrder(self, params):
@@ -868,19 +868,23 @@ class FaunaDriver(AbstractDriver):
 
                     let district = DISTRICT.byDistrictIdAndWarehouse(${d_id}, ${w_id}).first()
                     let d_tax = district!.D_TAX
-                    let district_counter = DISTRICT_NextOrderIdCounter.byDistrict(district).first()
-                    let d_next_o_id = district_counter!.next_order_id
+                    // let district_counter = DISTRICT_NextOrderIdCounter.byDistrict(district).first()
+                    // let d_next_o_id = district_counter!.next_order_id
+                    let d_next_o_id = district!.D_NEXT_O_ID
 
                     // --------------------------------
                     // Insert Order Information
                     // --------------------------------
                     // Increment the counter
-                    DISTRICT_NextOrderIdCounter.create({
-                      district: district,
-                      next_order_id: d_next_o_id + 1
-                    })
-                    district_counter!.update({
-                      ttl: Time.now().add(1, "minute")
+                    // DISTRICT_NextOrderIdCounter.create({
+                    //  district: district,
+                    //  next_order_id: d_next_o_id + 1
+                    // })
+                    // district_counter!.update({
+                    //  ttl: Time.now().add(1, "minute")
+                    // })
+                    district!.update({
+                      D_NEXT_O_ID: d_next_o_id + 1
                     })
 
                     // Create New Order
@@ -1010,9 +1014,10 @@ class FaunaDriver(AbstractDriver):
                     q_denorm_order_lines=q_denorm_order_lines
                     )
             res: QuerySuccess = self.client.query(q, QueryOptions(query_tags={"operation": "doNewOrder"}))
-            data = res.data
             stats: QueryStats = res.stats
-            print(stats)
+            if stats.contention_retries > 0:
+              print(stats)
+            data = res.data
             item_data = data["item_data"]
             customer_info = data["customer_info"]
             ## Pack up values the client is missing (see TPC-C 2.4.3.5)
@@ -1026,7 +1031,7 @@ class FaunaDriver(AbstractDriver):
                 "next_o_id": data["d_next_o_id"],
                 "total": total
             }
-            return self.returnResult([ customer_info, misc, item_data ])
+            return self.returnResult([ customer_info, misc, item_data ], stats.contention_retries)
         except AbortError as err:
             logging.debug(err.abort)
             return self.returnResult(None)
@@ -1095,8 +1100,9 @@ class FaunaDriver(AbstractDriver):
                     q_order_line_denorm=q_order_line_denorm
                   )
             res: QuerySuccess = self.client.query(q, QueryOptions(query_tags={"operation": "doOrderStatus"}))
+            stats: QueryStats = res.stats
             data = res.data
-            return self.returnResult([ data["customer"], data["order"], data["orderLines"] ])
+            return self.returnResult([ data["customer"], data["order"], data["orderLines"] ], stats.contention_retries)
         except FaunaException as err:
             logging.error("FaunaException:")
             logging.error(err)
@@ -1204,8 +1210,9 @@ class FaunaDriver(AbstractDriver):
                   )
             
             res: QuerySuccess = self.client.query(q, QueryOptions(query_tags={"operation": "doPayment"}))
+            stats: QueryStats = res.stats
             data = res.data
-            return self.returnResult([ data["warehouse"], data["district"], data["customer"] ])
+            return self.returnResult([ data["warehouse"], data["district"], data["customer"] ], stats.contention_retries)
         except FaunaException as err:
             logging.error("FaunaException:")
             logging.error(err)
@@ -1256,7 +1263,8 @@ class FaunaDriver(AbstractDriver):
                         threshold=threshold
                       )
             res: QuerySuccess = self.client.query(q, QueryOptions(query_tags={"operation": "doStockLevel"}))
-            return self.returnResult(int(res.data))
+            stats: QueryStats = res.stats
+            return self.returnResult(int(res.data), stats.contention_retries)
         except FaunaException as err:
             logging.error("FaunaException:")
             logging.error(err)
