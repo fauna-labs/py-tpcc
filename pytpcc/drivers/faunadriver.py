@@ -32,7 +32,12 @@ TABLES = {
             "history_days": 0,            
             "indexes": {
               "byItemId": {
-                "terms": [{"field": ".I_ID"}]
+                "terms": [{"field": ".I_ID"}],
+                "values": [
+                    {"field": ".I_NAME"},
+                    {"field": ".I_PRICE"},
+                    {"field": ".I_DATA"}
+                ]
               }
             },
             "constraints": [
@@ -63,7 +68,8 @@ TABLES = {
             },
             "indexes": {
               "byWarehouseId": {
-                "terms": [{"field": ".W_ID"}]
+                "terms": [{"field": ".W_ID"}],
+                "values": [{"field": ".W_TAX"}]
               }
             },
             "constraints": [
@@ -145,6 +151,10 @@ TABLES = {
                 "terms": [
                     {"field": ".D_ID"},
                     {"field": ".D_W_ID"}
+                ],
+                "values": [
+                    {"field": ".D_TAX"},
+                    {"field": ".D_NEXT_O_ID"}
                 ]
               }
             },
@@ -260,6 +270,14 @@ TABLES = {
                   {"field": ".C_ID"},
                   {"field": ".C_D_ID"},
                   {"field": ".C_W_ID"}
+                ],
+                "values": [
+                  {"field": ".C_DISCOUNT"},
+                  {"field": ".C_FIRST"},
+                  {"field": ".C_MIDDLE"},
+                  {"field": ".C_LAST"},
+                  {"field": ".C_CREDIT"},
+                  {"field": ".C_BALANCE"}
                 ]
               },
               "byCustomerLastName_And_WarehouseDistrict": {
@@ -267,6 +285,13 @@ TABLES = {
                   {"field": ".C_LAST"},
                   {"field": ".C_D_ID"},
                   {"field": ".C_W_ID"}
+                ],
+                "values": [
+                  {"field": ".C_ID"},
+                  {"field": ".C_FIRST"},
+                  {"field": ".C_MIDDLE"},
+                  {"field": ".C_LAST"},
+                  {"field": ".C_BALANCE"}
                 ]
               }
             },
@@ -360,6 +385,12 @@ TABLES = {
                   {"field": ".O_C_ID"},
                   {"field": ".O_D_ID"},
                   {"field": ".O_W_ID"}
+                ],
+                "values": [
+                  {"field": ".O_ID"},
+                  {"field": ".O_CARRIER_ID"},
+                  {"field": ".O_ENTRY_D"},
+                  {"field": ".O_ORDER_LINES"}
                 ]
               }
             },
@@ -395,6 +426,9 @@ TABLES = {
                 "terms": [
                   {"field": ".NO_D_ID"},
                   {"field": ".NO_W_ID"}
+                ],
+                "values": [
+                  {"field": ".NO_O_ID"}
                 ]
               },
               "byDistrictWarehouseOrder": {
@@ -1227,16 +1261,17 @@ class FaunaDriver(AbstractDriver):
         try:
             if self.denormalize:
                 q = fql("""
-                        let district = DISTRICT.byDistrictIdAndWarehouse(${d_id}, ${w_id}).first()
-                        let o_id = DISTRICT_NextOrderIdCounter.byDistrict(district).first()!.next_order_id
+                        // let district = DISTRICT.byDistrictIdAndWarehouse(${d_id}, ${w_id}).first()
+                        // let o_id = DISTRICT_NextOrderIdCounter.byDistrict(district).first()!.next_order_id
+                        let o_id = DISTRICT.byDistrictIdAndWarehouse(${d_id}, ${w_id}).first()!.D_NEXT_O_ID
                         ${twenty}.map(x => {
                           let oid = o_id - (x+1)
-                          ORDERS.byOidDistrictWarehouse(oid, ${d_id}, ${w_id}).first()!.O_ORDER_LINES
+                          ORDERS.byOidDistrictWarehouse(oid, ${d_id}, ${w_id}).first()!.O_ORDER_LINES.map(x => x.OL_I_ID)
                         })
                         .flatten()
                         .distinct()
                         .map(x => {
-                          STOCK.byItemIdAndWarehouse(x, 1).where(.S_QUANTITY < 20).count()
+                          STOCK.byItemIdAndWarehouse(x, ${w_id}).where(.S_QUANTITY < ${threshold}).count()
                         })
                         .filter(x => { x > 0 }).length
                         """,
@@ -1247,8 +1282,9 @@ class FaunaDriver(AbstractDriver):
                       )                
             else:
                 q = fql("""
-                        let district = DISTRICT.byDistrictIdAndWarehouse(${d_id}, ${w_id}).first()
-                        let o_id = DISTRICT_NextOrderIdCounter.byDistrict(district).first()!.next_order_id
+                        // let district = DISTRICT.byDistrictIdAndWarehouse(${d_id}, ${w_id}).first()
+                        // let o_id = DISTRICT_NextOrderIdCounter.byDistrict(district).first()!.next_order_id
+                        let o_id = DISTRICT.byDistrictIdAndWarehouse(${d_id}, ${w_id}).first()!.D_NEXT_O_ID
 
                         ORDER_LINE.byDistrictWarehouse(${d_id}, ${w_id}, { 
                           from: o_id - 20,
