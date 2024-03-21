@@ -336,11 +336,6 @@ TABLES = {
         ],
         "schema": {
             "history_days": 0,
-            "computed_fields": {
-              "S_DISTS": {
-                "body": "(s) => {[s.S_DIST_01, s.S_DIST_02, s.S_DIST_03, s.S_DIST_04, s.S_DIST_05, s.S_DIST_06, s.S_DIST_07, s.S_DIST_08, s.S_DIST_09, s.S_DIST_10]}"
-              }
-            },
             "indexes": {
               "byItemIdAndWarehouse": {
                 "terms": [
@@ -959,7 +954,12 @@ class FaunaDriver(AbstractDriver):
                         let s_order_cnt = stock!.S_ORDER_CNT
                         let s_remote_cnt = stock!.S_REMOTE_CNT
                         let s_data = stock!.S_DATA
-                        let s_dist_xx = stock!.S_DISTS[${d_id} - 1]
+                        let dist = if (${d_id} >= 10) {
+                          "S_DIST_" + ${d_id}.toString()
+                        } else {
+                          "S_DIST_0" + ${d_id}.toString()
+                        }
+                        let s_dist_xx = stock![dist]
                       
                         let s_ytd = s_ytd + ol_quantity
                         let s_quantity = if (s_quantity >= ol_quantity + 10) {
@@ -1261,8 +1261,6 @@ class FaunaDriver(AbstractDriver):
         try:
             if self.denormalize:
                 q = fql("""
-                        // let district = DISTRICT.byDistrictIdAndWarehouse(${d_id}, ${w_id}).first()
-                        // let o_id = DISTRICT_NextOrderIdCounter.byDistrict(district).first()!.next_order_id
                         let o_id = DISTRICT.byDistrictIdAndWarehouse(${d_id}, ${w_id}).first()!.D_NEXT_O_ID
                         ${twenty}.map(x => {
                           let oid = o_id - (x+1)
@@ -1282,10 +1280,7 @@ class FaunaDriver(AbstractDriver):
                       )                
             else:
                 q = fql("""
-                        // let district = DISTRICT.byDistrictIdAndWarehouse(${d_id}, ${w_id}).first()
-                        // let o_id = DISTRICT_NextOrderIdCounter.byDistrict(district).first()!.next_order_id
                         let o_id = DISTRICT.byDistrictIdAndWarehouse(${d_id}, ${w_id}).first()!.D_NEXT_O_ID
-
                         ORDER_LINE.byDistrictWarehouse(${d_id}, ${w_id}, { 
                           from: o_id - 20,
                           to: o_id - 1
