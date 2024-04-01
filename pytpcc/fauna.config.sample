@@ -1,0 +1,9 @@
+# FaunaDriver Configuration File
+# Created 2024-02-16 13:37:39.053588
+[fauna]
+
+# The api key
+key                  = <secret>
+fauna_url            = https://db.fauna.com
+max_batch_size       = 250000
+denormalize          = True
